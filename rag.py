@@ -1,22 +1,13 @@
 import marimo
 
 __generated_with = "0.9.1"
-app = marimo.App()
+app = marimo.App(width="medium")
 
 
 @app.cell
 def __():
     import marimo as mo
     return (mo,)
-
-
-@app.cell
-def __():
-    from secret_key import openapi_key
-    import os
-    os.environ["OPENAI_API_KEY"] = openapi_key
-    os.environ["USER_AGENT"] = "Mozilla/5.0 (iPhone; CPU iPhone OS 15_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148'"
-    return openapi_key, os
 
 
 @app.cell
@@ -45,25 +36,65 @@ def __():
 
 @app.cell
 def __(document, mo):
-    mo.md(f"""{document}""")
+    mo.md(f""" ### Text from the Site:
+    \"{document[:1004]} [...]\" """)
     return
 
 
 @app.cell
 def __(mo):
-    mo.md("""# Split Document into Chunks""")
+    mo.md("""# Split Document""")
     return
 
 
 @app.cell
-def __(document):
+def __(mo):
+    _chunk_size = mo.ui.slider(
+        start=200,
+        stop=1000,
+        step=50, 
+        value=600,
+        label="Chunck Size:",
+    )
+
+    _chunk_overlap = mo.ui.slider(
+        start=0,
+        stop=200,
+        step=20, 
+        value=0,
+        label="Chunck Overlap:",
+    )
+
+    chunk_form = (
+        mo.md("""### Choose How to Split the Document
+        {chunk_size}\n
+        {chunk_overlap}
+        """)
+        .batch(
+            chunk_size=_chunk_size,
+            chunk_overlap=_chunk_overlap
+        )
+        .form(show_clear_button=True)
+    )
+
+    chunk_form
+    return (chunk_form,)
+
+
+@app.cell
+def __(chunk_form, document, mo):
+    mo.stop(
+        chunk_form.value == None,
+        mo.md("Choose How to Split the Document to Continue.")
+    )
+
     from langchain_text_splitters import CharacterTextSplitter
 
     # separete on \n because of how the page was read
     text_splitter = CharacterTextSplitter(
         separator="|",
-        chunk_size=600,
-        chunk_overlap=0,
+        chunk_size=chunk_form.value["chunk_size"],
+        chunk_overlap=chunk_form.value["chunk_overlap"],
         length_function=len,
         is_separator_regex=False,
     )
@@ -74,51 +105,48 @@ def __(document):
 
 @app.cell
 def __(chunks, mo):
-    number = mo.ui.number(
+    chunk_number = mo.ui.number(
         start=0,
-        stop=len(chunks),
+        stop=len(chunks)-1,
         step=1,
-        label="## Chunk to Show: ",
+        # label="### Chunk to Show:",
         value=0,
+        full_width=False,
     )
-    return (number,)
+
+    mo.vstack([
+       mo.md("### Show Chunk Number:"),
+       chunk_number
+    ])
+    return (chunk_number,)
 
 
 @app.cell
-def __(number):
-    number
-    return
-
-
-@app.cell
-def __(chunks, mo, number):
-    mo.md(chunks[number.value].page_content)
+def __(chunk_number, chunks, mo):
+    mo.md(chunks[chunk_number.value].page_content)
     return
 
 
 @app.cell
 def __(mo):
-    mo.md("""# Add Context to Chunks""")
+    mo.md("""# Add Context""")
     return
 
 
 @app.cell
 def __():
+    from secret_key import openapi_key
     from langchain_openai import ChatOpenAI
-    from langchain.prompts import ChatPromptTemplate
-    return ChatOpenAI, ChatPromptTemplate
 
-
-@app.cell
-def __(ChatOpenAI):
     llm = ChatOpenAI(
         model="gpt-4o-mini",
         temperature=0,
         max_tokens=None,
         timeout=None,
         max_retries=2,
+        api_key=openapi_key,
     )
-    return (llm,)
+    return ChatOpenAI, llm, openapi_key
 
 
 @app.cell
@@ -134,124 +162,186 @@ def __(mo):
     {chunk}
     </chunk>"""
 
-    context_prompt = mo.ui.code_editor(
+    context_form = mo.ui.code_editor(
         language="xml",
         value=default_context_prompt,
-        label="Context Prompt",
-        #full_width=True,
-        #rows=10,
+        label="Prompt to Generate Context: ",
+    ).form()
+
+    context_form
+    return context_form, default_context_prompt
+
+
+@app.cell
+def __(List, chunks, context_form, document, llm, mo):
+    mo.stop(
+        context_form.value == None,
+        mo.md("Choose the Prompt to Generate Context to Continue.")
     )
-    return context_prompt, default_context_prompt
 
-
-@app.cell
-def __(context_prompt):
-    context_prompt
-    return
-
-
-@app.cell
-def __(ChatPromptTemplate, chunks, document, llm):
     from langchain.schema import Document
+    from langchain.prompts import ChatPromptTemplate
 
-    contextualized_chunks = []
+    def contextualize_chunks(chunks: List[Document], context: str) -> List[Document]:
+        contextualized_chunks = []
 
-    for chunk in chunks:
-        prompt = ChatPromptTemplate.from_template(
-            """<document> 
-            {document}
-            </document> 
-            Here is the chunk we want to situate within the whole document
-            <chunk> 
-            {chunk}
-            </chunk> 
-            Please give a short succinct context to situate this chunk within the overall document for the purposes of improving search retrieval of the chunk. Answer only with the succinct context and nothing else."""
-        )
-        messages = prompt.format_messages(document=document, chunk=chunk)
-        response = llm.invoke(messages)
-        contextualized_chunk = f"{response.content}\n\n{chunk.page_content}"
-        contextualized_chunks.append(Document(page_content=contextualized_chunk, metadata=chunk.metadata))
+        for chunk in chunks:
+            prompt = ChatPromptTemplate.from_template(context)
+            messages = prompt.format_messages(document=document, chunk=chunk)
+            response = llm.invoke(messages)
+
+            contextualized_chunk = f"{response.content}\n\n{chunk.page_content}"
+            contextualized_chunks.append(
+                Document(page_content=contextualized_chunk, metadata=chunk.metadata)
+            )
+
+        return contextualized_chunks
+
+    contextualized_chunks = contextualize_chunks(chunks, context_form.value)
     return (
+        ChatPromptTemplate,
         Document,
-        chunk,
-        contextualized_chunk,
+        contextualize_chunks,
         contextualized_chunks,
-        messages,
-        prompt,
-        response,
     )
 
 
 @app.cell
-def __(contextualized_chunks):
-    print(contextualized_chunks[0].page_content)
+def __(contextualized_chunks, mo):
+    ctx_number = mo.ui.number(
+        start=0,
+        stop=len(contextualized_chunks)-1,
+        step=1,
+        value=0,
+        full_width=False,
+    )
+
+    mo.vstack([
+       mo.md("### Show Contextualized Chunk Number:"),
+       ctx_number
+    ])
+    return (ctx_number,)
+
+
+@app.cell
+def __(contextualized_chunks, ctx_number, mo):
+    mo.md(contextualized_chunks[ctx_number.value].page_content)
     return
 
 
 @app.cell
 def __(mo):
-    mo.md("""### Add Contextualized Chunks to Another DB""")
+    mo.md("""# Add Embeddings to AstraDB""")
     return
-
-
-@app.cell
-def __(AstraDBVectorStore, astra_api_endpoint, astra_token, my_embedding):
-    new_store = AstraDBVectorStore(
-      embedding=my_embedding,
-      collection_name="rag_context",
-      api_endpoint=astra_api_endpoint,
-      token=astra_token,
-    )
-    return (new_store,)
-
-
-@app.cell
-def __(contextualized_chunks, new_store, uuid4):
-    uuids_1 = [str(uuid4()) for _ in range(len(contextualized_chunks))]
-    new_store.add_documents(documents=contextualized_chunks, ids=uuids_1)
-    return (uuids_1,)
 
 
 @app.cell
 def __(mo):
-    mo.md("""### Try using Rag (Without Context)""")
-    return
+    _astra_token = mo.ui.text(
+        kind='password',
+        label = 'Astra Token: '
+    )
 
+    _astra_api_endpoint = mo.ui.text(
+        kind='password',
+        label = 'Astra API Endpoint: '
+    )
 
-@app.cell
-def __(ChatPromptTemplate, llm):
-    from typing import List
-
-    def generate_answer(query: str, relevant_chunks: List[str]) -> str:
-        prompt = ChatPromptTemplate.from_template(
-            """<purpose>
-            1. Based on the given context answer the question.
-            2. If the given context is not sufficient to answer the question, say it.
-            </purpose>
-            <question>
-            {query}
-            </question>
-            <context>
-            {chunks}
-            </context>"""                       
+    astra_form = (
+        mo.md("""### AstraDB Info
+            {astra_token}\n
+            {astra_api_endpoint}"""
         )
-        messages = prompt.format_messages(query=query, chunks="\n\n".join(relevant_chunks))
-        response = llm.invoke(messages)
-        return response
-    return List, generate_answer
+        .batch(
+            astra_token=_astra_token,
+            astra_api_endpoint=_astra_api_endpoint
+        )
+        .form()
+    )
+
+    astra_form
+    return (astra_form,)
 
 
 @app.cell
-def __(Document, List, chunks):
-    from rank_bm25 import BM25Okapi
+def __(astra_form, contextualized_chunks, mo):
+    mo.stop(
+        astra_form.value == None,
+        mo.md("Submit AstraDB Info to continue.")
+    )
 
-    #bm 25 for rag
-    def create_bm25_index(chunks: List[Document]) -> BM25Okapi:
-        tokenized_chunks = [chunk.page_content.split() for chunk in chunks]
-        return BM25Okapi(tokenized_chunks)
+    from langchain_astradb import AstraDBVectorStore
+    from langchain_openai import OpenAIEmbeddings
+    from uuid import uuid4
 
-    bm25_index = create_bm25_index(chunks)
-    return BM25Okapi, bm25_index, create_bm25_index
+    def add_embeddings_to_astradb(contextualized_chunks, astra_api_endpoint, astra_token):
+        embedding = OpenAIEmbeddings(
+            model="text-embedding-3-small"
+        )
+
+        vector_store = AstraDBVectorStore(
+            embedding=embedding,
+            collection_name="rag",
+            api_endpoint=astra_api_endpoint,
+            token=astra_token,
+        )
+
+        uuids = [str(uuid4()) for _ in range(len(contextualized_chunks))]
+        vector_store.add_documents(documents=contextualized_chunks, ids=uuids)
+
+    add_embeddings_to_astradb(
+        contextualized_chunks,
+        astra_form.value["astra_api_endpoint"],
+        astra_form.value["astra_token"]
+    )
+    return (
+        AstraDBVectorStore,
+        OpenAIEmbeddings,
+        add_embeddings_to_astradb,
+        uuid4,
+    )
+
+
+@app.cell
+def __(mo):
+    mo.md("""# Try using Rag (Without Context)""")
+    return
+
+
+@app.cell
+def __():
+    # from typing import List
+
+    # def generate_answer(query: str, relevant_chunks: List[str]) -> str:
+    #     prompt = ChatPromptTemplate.from_template(
+    #         """<purpose>
+    #         1. Based on the given context answer the question.
+    #         2. If the given context is not sufficient to answer the question, say it.
+    #         </purpose>
+    #         <question>
+    #         {query}
+    #         </question>
+    #         <context>
+    #         {chunks}
+    #         </context>"""                       
+    #     )
+    #     messages = prompt.format_messages(query=query, chunks="\n\n".join(relevant_chunks))
+    #     response = llm.invoke(messages)
+    #     return response
+    return
+
+
+@app.cell
+def __():
+    # from rank_bm25 import BM25Okapi
+
+    # #bm 25 for rag
+    # def create_bm25_index(chunks: List[Document]) -> BM25Okapi:
+    #     tokenized_chunks = [chunk.page_content.split() for chunk in chunks]
+    #     return BM25Okapi(tokenized_chunks)
+
+    # bm25_index = create_bm25_index(chunks)
+    return
 
 
 @app.cell
@@ -267,28 +357,28 @@ def __():
 
 
 @app.cell
-def __(bm25_index, bm25_results, chunks, query, tokenized_query):
-    _tokenized_query = query.split()
-    _bm25_results = bm25_index.get_top_n(tokenized_query, chunks, n=1)
-    bm25_results_content = [doc.page_content for doc in bm25_results]
-    return (bm25_results_content,)
-
-
-@app.cell
-def __(bm25_results_content):
-    print(bm25_results_content[0])
+def __():
+    # _tokenized_query = query.split()
+    # _bm25_results = bm25_index.get_top_n(tokenized_query, chunks, n=1)
+    # bm25_results_content = [doc.page_content for doc in bm25_results]
     return
 
 
 @app.cell
-def __(bm25_results_content, generate_answer, query):
-    response_1 = generate_answer(query=query, relevant_chunks=bm25_results_content)
-    return (response_1,)
+def __():
+    # print(bm25_results_content[0])
+    return
 
 
 @app.cell
-def __(response_1):
-    response_1.content
+def __():
+    # response_1 = generate_answer(query=query, relevant_chunks=bm25_results_content)
+    return
+
+
+@app.cell
+def __():
+    # response_1.content
     return
 
 
@@ -299,94 +389,23 @@ def __(mo):
 
 
 @app.cell
-def __(
-    bm25_index,
-    bm25_results,
-    contextualized_chunks,
-    query,
-    tokenized_query,
-):
-    _tokenized_query = query.split()
-    _bm25_results = bm25_index.get_top_n(tokenized_query, contextualized_chunks, n=1)
-    bm25_results_content_1 = [doc.page_content for doc in bm25_results]
-    return (bm25_results_content_1,)
-
-
-@app.cell
-def __(bm25_results_content_1):
-    bm25_results_content_1[0]
-    return
-
-
-@app.cell
-def __(bm25_results_content_1, generate_answer, query):
-    response_2 = generate_answer(query=query, relevant_chunks=bm25_results_content_1)
-    response_2.content
-    return (response_2,)
-
-
-@app.cell
 def __():
-    import marimo as mo
-    return (mo,)
-
-
-@app.cell
-def __(mo):
-    mo.md("""# Initializing Vector DB""")
+    # _tokenized_query = query.split()
+    # _bm25_results = bm25_index.get_top_n(tokenized_query, contextualized_chunks, n=1)
+    # bm25_results_content_1 = [doc.page_content for doc in bm25_results]
     return
 
 
 @app.cell
 def __():
-    from langchain_openai import OpenAIEmbeddings
-
-    my_embedding = OpenAIEmbeddings(
-        model="text-embedding-3-small"
-    )
-    return OpenAIEmbeddings, my_embedding
-
-
-@app.cell
-def __():
-    import getpass
-
-    astra_token = getpass.getpass(prompt="Astra Token: ")
-    astra_api_endpoint = getpass.getpass(prompt="Astra Token: ")
-    return astra_api_endpoint, astra_token, getpass
-
-
-@app.cell
-def __(astra_api_endpoint, astra_token, my_embedding):
-    from langchain_astradb import AstraDBVectorStore
-
-    my_store = AstraDBVectorStore(
-      embedding=my_embedding,
-      collection_name="rag",
-      api_endpoint=astra_api_endpoint,
-      token=astra_token,
-    )
-    return AstraDBVectorStore, my_store
-
-
-@app.cell
-def __(mo):
-    mo.md("""### Add Chunks to Vector DB""")
+    # bm25_results_content_1[0]
     return
 
 
 @app.cell
-def __(chunks):
-    from uuid import uuid4
-
-    # create id for each doc
-    uuids = [str(uuid4()) for _ in range(len(chunks))]
-    return uuid4, uuids
-
-
-@app.cell
-def __(chunks, my_store, uuids):
-    my_store.add_documents(documents=chunks, ids=uuids)
+def __():
+    # response_2 = generate_answer(query=query, relevant_chunks=bm25_results_content_1)
+    # response_2.content
     return
 
 
